@@ -1019,31 +1019,43 @@ namespace TelegramFinanceBot
     }
 
     class Program
+{
+    static async Task Main(string[] args)
     {
-        static async Task Main(string[] args)
+        Console.WriteLine("=== Telegram Бот для учёта финансов ===\n");
+
+        string token = Environment.GetEnvironmentVariable("BOT_TOKEN");
+        if (string.IsNullOrEmpty(token))
         {
-            Console.WriteLine("=== Telegram Бот для учёта финансов ===\n");
-            string token = Environment.GetEnvironmentVariable("BOT_TOKEN");
-            if (string.IsNullOrEmpty(token))
-            {
-                Console.Write("Введите токен бота (получите у @BotFather): ");
-                token = Console.ReadLine()?.Trim();
-            }
+            Console.Write("Введите токен бота (получите у @BotFather): ");
+            token = Console.ReadLine()?.Trim();
+        }
 
-            if (string.IsNullOrEmpty(token))
-            {
-                Console.WriteLine("Токен не может быть пустым!");
-                return;
-            }
+        if (string.IsNullOrEmpty(token))
+        {
+            Console.WriteLine("Токен не может быть пустым!");
+            return;
+        }
 
-            var bot = new FinanceBot(token);
-            var cts = new CancellationTokenSource();
+        var bot = new FinanceBot(token);
+        var cts = new CancellationTokenSource();
 
-            await bot.StartAsync(cts.Token);
+        await bot.StartAsync(cts.Token);
 
+        // На сервере не ждём Enter, а держим бота запущенным
+        // На локальном компьютере ждём Enter для выхода
+        if (Environment.GetEnvironmentVariable("RENDER") == null)
+        {
             Console.WriteLine("Нажми Enter для выхода...");
             Console.ReadLine();
-            cts.Cancel();
         }
+        else
+        {
+            // На Render просто ждём бесконечно
+            await Task.Delay(-1, cts.Token);
+        }
+
+        cts.Cancel();
     }
+}
 }
