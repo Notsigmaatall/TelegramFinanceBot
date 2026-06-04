@@ -7,14 +7,19 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Telegram.Bot;
-using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
 
 namespace TelegramFinanceBot
 {
+    // ==================== МОДЕЛИ ДАННЫХ ====================
+
     public class Transaction
     {
         public int Id { get; set; }
@@ -44,6 +49,8 @@ namespace TelegramFinanceBot
         public string PendingDescription { get; set; } = "";
         public int? PendingEditId { get; set; }
     }
+
+    // ==================== БАЗА ДАННЫХ ====================
 
     public class DatabaseHelper
     {
@@ -482,12 +489,13 @@ namespace TelegramFinanceBot
         }
     }
 
+    // ==================== ОСНОВНАЯ ЛОГИКА БОТА ====================
+
     public class FinanceBot
     {
         private ITelegramBotClient botClient;
         private DatabaseHelper db;
         private Dictionary<long, UserSession> sessions;
-        private Timer reminderTimer;
         private Dictionary<string, string> categoryNames;
 
         public FinanceBot(string token)
@@ -497,7 +505,6 @@ namespace TelegramFinanceBot
             sessions = new Dictionary<long, UserSession>();
             categoryNames = new Dictionary<string, string>
             {
-                // Расходы
                 {"food", "🍔 Еда"},
                 {"transport", "🚗 Транспорт"},
                 {"housing", "🏠 Жильё"},
@@ -506,7 +513,6 @@ namespace TelegramFinanceBot
                 {"health", "💊 Здоровье"},
                 {"education", "📚 Образование"},
                 {"other", "💵 Другое (расход)"},
-                // Доходы
                 {"salary", "💰 Зарплата"},
                 {"freelance", "💼 Фриланс/Подработка"},
                 {"gift", "🎁 Подарок"},
@@ -515,43 +521,9 @@ namespace TelegramFinanceBot
                 {"interest", "🏦 Проценты по вкладу"},
                 {"other_income", "💵 Другое (доход)"}
             };
-            StartReminderChecker();
         }
 
-        private void StartReminderChecker()
-        {
-            reminderTimer = new Timer(async _ => await CheckReminders(), null, TimeSpan.Zero, TimeSpan.FromMinutes(60));
-        }
-
-        private async Task CheckReminders()
-        {
-            Console.WriteLine($"[{DateTime.Now}] Проверка напоминаний...");
-        }
-
-        public async Task SendDailyReminder(long chatId)
-        {
-            if (!db.WasRemindedToday(chatId))
-            {
-                await botClient.SendMessage(
-                    chatId: chatId,
-                    text: "📝 **Ежедневное напоминание!**\n\nНе забудьте записать свои траты за сегодня.\n\nИспользуйте `/add` чтобы добавить транзакцию или `/report` для просмотра отчёта.",
-                    parseMode: ParseMode.Markdown);
-                db.UpdateReminderDate(chatId);
-            }
-        }
-
-        public async Task StartAsync(CancellationToken ct)
-        {
-            var receiverOptions = new ReceiverOptions
-            {
-                AllowedUpdates = Array.Empty<UpdateType>()
-            };
-
-            botClient.StartReceiving(HandleUpdateAsync, HandleErrorAsync, receiverOptions, ct);
-            Console.WriteLine("Бот запущен!");
-        }
-
-        private async Task HandleUpdateAsync(ITelegramBotClient client, Update update, CancellationToken ct)
+        public async Task HandleUpdateAsync(Update update)
         {
             if (update.CallbackQuery != null)
             {
@@ -574,14 +546,14 @@ namespace TelegramFinanceBot
 
             if (text != null && text.StartsWith("/"))
             {
-                await HandleCommand(chatId, text, username, session, ct);
+                await HandleCommand(chatId, text, username, session);
                 return;
             }
 
-            await HandleDialog(chatId, text, session, ct);
+            await HandleDialog(chatId, text, session);
         }
 
-        private async Task HandleCommand(long chatId, string command, string username, UserSession session, CancellationToken ct)
+        private async Task HandleCommand(long chatId, string command, string username, UserSession session)
         {
             var parts = command.Split(' ');
             var mainCommand = parts[0];
@@ -606,8 +578,7 @@ namespace TelegramFinanceBot
                         "/edit [ID] [сумма] - редактировать транзакцию\n" +
                         "/setreminder [ЧЧ:ММ] - установить ежедневное напоминание\n" +
                         "/cancel - отменить действие\n\n" +
-                        "💰 Просто нажми /add и следуй инструкциям!",
-                        cancellationToken: ct);
+                        "💰 Просто нажми /add и следуй инструкциям!");
                     break;
 
                 case "/add":
@@ -617,39 +588,38 @@ namespace TelegramFinanceBot
                     session.PendingDescription = "";
                     session.PendingEditId = null;
                     db.SaveSession(session);
-                    await botClient.SendMessage(chatId, "💰 Введите сумму (например: 500 или 123.50):", cancellationToken: ct);
+                    await botClient.SendMessage(chatId, "💰 Введите сумму (например: 500 или 123.50):");
                     break;
 
                 case "/balance":
                     var balance = db.GetBalance(chatId);
                     await botClient.SendMessage(chatId,
                         $"💰 Ваш текущий баланс: {balance:F2} ₽\n" +
-                        (balance >= 0 ? "✅ Отлично!" : "⚠️ У вас расходы превышают доходы"),
-                        cancellationToken: ct);
+                        (balance >= 0 ? "✅ Отлично!" : "⚠️ У вас расходы превышают доходы"));
                     break;
 
                 case "/report":
-                    await ShowReport(chatId, DateTime.Today, DateTime.Today, "за сегодня", ct);
+                    await ShowReport(chatId, DateTime.Today, DateTime.Today, "за сегодня");
                     break;
 
                 case "/week":
                     var weekAgo = DateTime.Today.AddDays(-7);
-                    await ShowReport(chatId, weekAgo, DateTime.Today, "за неделю", ct);
+                    await ShowReport(chatId, weekAgo, DateTime.Today, "за неделю");
                     break;
 
                 case "/month":
                     var monthAgo = DateTime.Today.AddMonths(-1);
-                    await ShowReport(chatId, monthAgo, DateTime.Today, "за месяц", ct);
+                    await ShowReport(chatId, monthAgo, DateTime.Today, "за месяц");
                     break;
 
                 case "/export":
-                    await ExportToCsv(chatId, DateTime.Today.AddMonths(-1), DateTime.Today, ct);
+                    await ExportToCsv(chatId, DateTime.Today.AddMonths(-1), DateTime.Today);
                     break;
 
                 case "/budget":
                     if (parts.Length < 3)
                     {
-                        await botClient.SendMessage(chatId, "📊 Использование: `/budget [категория] [сумма]`\n\nПример: `/budget Еда 15000`\n\nКатегории: Еда, Транспорт, Жильё, Связь/Интернет, Развлечения, Здоровье, Образование, Другое", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                        await botClient.SendMessage(chatId, "📊 Использование: `/budget [категория] [сумма]`\n\nПример: `/budget Еда 15000`", parseMode: ParseMode.Markdown);
                         return;
                     }
                     var categoryName = string.Join(" ", parts.Skip(1).Take(parts.Length - 2));
@@ -657,22 +627,22 @@ namespace TelegramFinanceBot
                     {
                         var fullCategory = categoryNames.FirstOrDefault(x => x.Value == categoryName || x.Key == categoryName).Value ?? categoryName;
                         db.SetBudget(chatId, fullCategory, limit);
-                        await botClient.SendMessage(chatId, $"✅ Установлен бюджет на категорию {fullCategory}: {limit:F2} ₽ на текущий месяц.", cancellationToken: ct);
+                        await botClient.SendMessage(chatId, $"✅ Установлен бюджет на категорию {fullCategory}: {limit:F2} ₽ на текущий месяц.");
                     }
                     else
                     {
-                        await botClient.SendMessage(chatId, "❌ Неверный формат. Пример: `/budget Еда 15000`", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                        await botClient.SendMessage(chatId, "❌ Неверный формат. Пример: `/budget Еда 15000`", parseMode: ParseMode.Markdown);
                     }
                     break;
 
                 case "/checkbudget":
-                    await CheckBudget(chatId, ct);
+                    await CheckBudget(chatId);
                     break;
 
                 case "/edit":
                     if (parts.Length < 3)
                     {
-                        await botClient.SendMessage(chatId, "✏️ Использование: `/edit [ID] [новая сумма]`\n\nЧтобы узнать ID транзакции, используйте `/report`", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                        await botClient.SendMessage(chatId, "✏️ Использование: `/edit [ID] [новая сумма]`\n\nЧтобы узнать ID транзакции, используйте `/report`", parseMode: ParseMode.Markdown);
                         return;
                     }
                     if (int.TryParse(parts[1], out int editId) && decimal.TryParse(parts[2], NumberStyles.Any, CultureInfo.InvariantCulture, out decimal newAmount))
@@ -682,55 +652,55 @@ namespace TelegramFinanceBot
                         {
                             existingTransaction.Amount = newAmount;
                             db.UpdateTransaction(existingTransaction);
-                            await botClient.SendMessage(chatId, $"✅ Транзакция #{editId} обновлена! Новая сумма: {newAmount:F2} ₽", cancellationToken: ct);
+                            await botClient.SendMessage(chatId, $"✅ Транзакция #{editId} обновлена! Новая сумма: {newAmount:F2} ₽");
                         }
                         else
                         {
-                            await botClient.SendMessage(chatId, $"❌ Транзакция #{editId} не найдена.", cancellationToken: ct);
+                            await botClient.SendMessage(chatId, $"❌ Транзакция #{editId} не найдена.");
                         }
                     }
                     else
                     {
-                        await botClient.SendMessage(chatId, "❌ Неверный формат. Пример: `/edit 5 1000`", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                        await botClient.SendMessage(chatId, "❌ Неверный формат. Пример: `/edit 5 1000`", parseMode: ParseMode.Markdown);
                     }
                     break;
 
                 case "/setreminder":
                     if (parts.Length < 2)
                     {
-                        await botClient.SendMessage(chatId, "⏰ Использование: `/setreminder [ЧЧ:ММ]`\n\nПример: `/setreminder 21:00`\n\nЯ буду напоминать вам записывать траты каждый день в это время.", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                        await botClient.SendMessage(chatId, "⏰ Использование: `/setreminder [ЧЧ:ММ]`\n\nПример: `/setreminder 21:00`", parseMode: ParseMode.Markdown);
                         return;
                     }
                     var reminderTime = parts[1];
                     if (TimeSpan.TryParse(reminderTime, out _))
                     {
                         db.SaveDailyReminder(chatId, reminderTime);
-                        await botClient.SendMessage(chatId, $"✅ Ежедневное напоминание установлено на {reminderTime}!", cancellationToken: ct);
+                        await botClient.SendMessage(chatId, $"✅ Ежедневное напоминание установлено на {reminderTime}!");
                     }
                     else
                     {
-                        await botClient.SendMessage(chatId, "❌ Неверный формат времени. Используйте ЧЧ:ММ (например, 21:00)", cancellationToken: ct);
+                        await botClient.SendMessage(chatId, "❌ Неверный формат времени. Используйте ЧЧ:ММ (например, 21:00)");
                     }
                     break;
 
                 case "/cancel":
                     session.CurrentStep = "idle";
                     db.SaveSession(session);
-                    await botClient.SendMessage(chatId, "❌ Действие отменено.", cancellationToken: ct);
+                    await botClient.SendMessage(chatId, "❌ Действие отменено.");
                     break;
 
                 default:
-                    await botClient.SendMessage(chatId, "❓ Неизвестная команда. Используйте /start для списка команд.", cancellationToken: ct);
+                    await botClient.SendMessage(chatId, "❓ Неизвестная команда. Используйте /start для списка команд.");
                     break;
             }
         }
 
-        private async Task CheckBudget(long chatId, CancellationToken ct)
+        private async Task CheckBudget(long chatId)
         {
             var budgets = db.GetAllBudgets(chatId);
             if (budgets.Count == 0)
             {
-                await botClient.SendMessage(chatId, "📊 У вас нет установленных бюджетов. Используйте `/budget [категория] [сумма]`", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                await botClient.SendMessage(chatId, "📊 У вас нет установленных бюджетов. Используйте `/budget [категория] [сумма]`", parseMode: ParseMode.Markdown);
                 return;
             }
 
@@ -765,7 +735,7 @@ namespace TelegramFinanceBot
                 report += "⚠️ Внимание! У вас превышение бюджета по некоторым категориям!";
             }
 
-            await botClient.SendMessage(chatId, report, parseMode: ParseMode.Markdown, cancellationToken: ct);
+            await botClient.SendMessage(chatId, report, parseMode: ParseMode.Markdown);
         }
 
         private string GetProgressBar(double percent)
@@ -776,13 +746,13 @@ namespace TelegramFinanceBot
             return bar;
         }
 
-        private async Task ExportToCsv(long chatId, DateTime startDate, DateTime endDate, CancellationToken ct)
+        private async Task ExportToCsv(long chatId, DateTime startDate, DateTime endDate)
         {
             var transactions = db.GetTransactions(chatId, startDate, endDate.AddDays(1).AddSeconds(-1));
 
             if (transactions.Count == 0)
             {
-                await botClient.SendMessage(chatId, "📊 Нет транзакций за указанный период для экспорта.", cancellationToken: ct);
+                await botClient.SendMessage(chatId, "📊 Нет транзакций за указанный период для экспорта.");
                 return;
             }
 
@@ -800,14 +770,14 @@ namespace TelegramFinanceBot
             using var stream = new MemoryStream(fileBytes);
             var inputFile = new InputFileStream(stream, fileName);
 
-            await botClient.SendDocument(chatId, inputFile, caption: $"📊 Отчёт за период {startDate:dd.MM.yyyy} - {endDate:dd.MM.yyyy}", cancellationToken: ct);
+            await botClient.SendDocument(chatId, inputFile, caption: $"📊 Отчёт за период {startDate:dd.MM.yyyy} - {endDate:dd.MM.yyyy}");
         }
 
-        private async Task HandleDialog(long chatId, string text, UserSession session, CancellationToken ct)
+        private async Task HandleDialog(long chatId, string text, UserSession session)
         {
             if (session.CurrentStep == "idle")
             {
-                await botClient.SendMessage(chatId, "Используйте /add чтобы добавить транзакцию или /balance для проверки баланса", cancellationToken: ct);
+                await botClient.SendMessage(chatId, "Используйте /add чтобы добавить транзакцию или /balance для проверки баланса");
                 return;
             }
 
@@ -817,7 +787,7 @@ namespace TelegramFinanceBot
                 {
                     if (amount <= 0)
                     {
-                        await botClient.SendMessage(chatId, "❌ Сумма должна быть больше 0. Попробуйте ещё раз:", cancellationToken: ct);
+                        await botClient.SendMessage(chatId, "❌ Сумма должна быть больше 0. Попробуйте ещё раз:");
                         return;
                     }
 
@@ -831,11 +801,11 @@ namespace TelegramFinanceBot
                         new[] { InlineKeyboardButton.WithCallbackData("💸 Расход", "type_expense") }
                     });
 
-                    await botClient.SendMessage(chatId, $"Сумма: {amount:F2} ₽\nТеперь выберите тип:", replyMarkup: keyboard, cancellationToken: ct);
+                    await botClient.SendMessage(chatId, $"Сумма: {amount:F2} ₽\nТеперь выберите тип:", replyMarkup: keyboard);
                 }
                 else
                 {
-                    await botClient.SendMessage(chatId, "❌ Введите корректное число (например: 500 или 123.50):", cancellationToken: ct);
+                    await botClient.SendMessage(chatId, "❌ Введите корректное число (например: 500 или 123.50):");
                 }
                 return;
             }
@@ -863,7 +833,6 @@ namespace TelegramFinanceBot
 
                 if (type == "income")
                 {
-                    // Категории для ДОХОДОВ
                     keyboard = new InlineKeyboardMarkup(new[]
                     {
                         new[] { InlineKeyboardButton.WithCallbackData("💰 Зарплата", "cat_salary") },
@@ -877,7 +846,6 @@ namespace TelegramFinanceBot
                 }
                 else
                 {
-                    // Категории для РАСХОДОВ
                     keyboard = new InlineKeyboardMarkup(new[]
                     {
                         new[] { InlineKeyboardButton.WithCallbackData("🍔 Еда", "cat_food") },
@@ -904,7 +872,6 @@ namespace TelegramFinanceBot
 
                 var categoryNamesLocal = new Dictionary<string, string>
                 {
-                    // Расходы
                     {"food", "🍔 Еда"},
                     {"transport", "🚗 Транспорт"},
                     {"housing", "🏠 Жильё"},
@@ -913,7 +880,6 @@ namespace TelegramFinanceBot
                     {"health", "💊 Здоровье"},
                     {"education", "📚 Образование"},
                     {"other", "💵 Другое (расход)"},
-                    // Доходы
                     {"salary", "💰 Зарплата"},
                     {"freelance", "💼 Фриланс/Подработка"},
                     {"gift", "🎁 Подарок"},
@@ -971,13 +937,13 @@ namespace TelegramFinanceBot
             }
         }
 
-        private async Task ShowReport(long chatId, DateTime startDate, DateTime endDate, string periodName, CancellationToken ct)
+        private async Task ShowReport(long chatId, DateTime startDate, DateTime endDate, string periodName)
         {
             var transactions = db.GetTransactions(chatId, startDate, endDate.AddDays(1).AddSeconds(-1));
 
             if (transactions.Count == 0)
             {
-                await botClient.SendMessage(chatId, $"📊 Нет транзакций {periodName}.", cancellationToken: ct);
+                await botClient.SendMessage(chatId, $"📊 Нет транзакций {periodName}.");
                 return;
             }
 
@@ -1008,54 +974,67 @@ namespace TelegramFinanceBot
             report += "\n━━━━━━━━━━━━━━━━━━━━\n";
             report += "✏️ Для редактирования транзакции используйте:\n/edit [ID] [новая сумма]\n\nПример: /edit 1 500";
 
-            await botClient.SendMessage(chatId, report, cancellationToken: ct);
-        }
-
-        private Task HandleErrorAsync(ITelegramBotClient client, Exception exception, CancellationToken ct)
-        {
-            Console.WriteLine($"Ошибка: {exception.Message}");
-            return Task.CompletedTask;
+            await botClient.SendMessage(chatId, report);
         }
     }
+
+    // ==================== ТОЧКА ВХОДА ====================
 
     class Program
-{
-    static async Task Main(string[] args)
     {
-        Console.WriteLine("=== Telegram Бот для учёта финансов ===\n");
-
-        string token = Environment.GetEnvironmentVariable("BOT_TOKEN");
-        if (string.IsNullOrEmpty(token))
+        static async Task Main(string[] args)
         {
-            Console.Write("Введите токен бота (получите у @BotFather): ");
-            token = Console.ReadLine()?.Trim();
+            Console.WriteLine("=== Telegram Бот для учёта финансов ===\n");
+
+            string token = Environment.GetEnvironmentVariable("BOT_TOKEN");
+            if (string.IsNullOrEmpty(token))
+            {
+                Console.Write("Введите токен бота (получите у @BotFather): ");
+                token = Console.ReadLine()?.Trim();
+            }
+
+            if (string.IsNullOrEmpty(token))
+            {
+                Console.WriteLine("Токен не может быть пустым!");
+                return;
+            }
+
+            var bot = new FinanceBot(token);
+
+            var builder = WebApplication.CreateBuilder(args);
+            builder.Services.AddSingleton(bot);
+
+            var app = builder.Build();
+
+            app.MapPost($"/webhook/{token}", async (HttpContext context, FinanceBot botInstance) =>
+            {
+                var update = await context.Request.ReadFromJsonAsync<Update>();
+                if (update != null)
+                {
+                    await botInstance.HandleUpdateAsync(update);
+                }
+                return Results.Ok();
+            });
+
+            app.MapGet("/health", () => Results.Ok("Bot is running"));
+
+            _ = app.RunAsync();
+
+            string renderUrl = Environment.GetEnvironmentVariable("RENDER_EXTERNAL_URL");
+            if (string.IsNullOrEmpty(renderUrl))
+            {
+                Console.WriteLine("Локальный запуск.");
+                Console.WriteLine("Нажми Enter для выхода...");
+                Console.ReadLine();
+            }
+            else
+            {
+                string webhookUrl = $"https://{renderUrl}/webhook/{token}";
+                Console.WriteLine($"Бот запущен! Вебхук установи вручную по ссылке: {webhookUrl}");
+                Console.WriteLine("Скопируй эту ссылку и вставь в браузер:");
+                Console.WriteLine(webhookUrl);
+                await Task.Delay(-1);
+            }
         }
-
-        if (string.IsNullOrEmpty(token))
-        {
-            Console.WriteLine("Токен не может быть пустым!");
-            return;
-        }
-
-        var bot = new FinanceBot(token);
-        var cts = new CancellationTokenSource();
-
-        await bot.StartAsync(cts.Token);
-
-        // На сервере не ждём Enter, а держим бота запущенным
-        // На локальном компьютере ждём Enter для выхода
-        if (Environment.GetEnvironmentVariable("RENDER") == null)
-        {
-            Console.WriteLine("Нажми Enter для выхода...");
-            Console.ReadLine();
-        }
-        else
-        {
-            // На Render просто ждём бесконечно
-            await Task.Delay(-1, cts.Token);
-        }
-
-        cts.Cancel();
     }
-}
 }
